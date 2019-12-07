@@ -236,6 +236,14 @@ func (w *Writer) write(bufs ...[]byte) error {
 	return nil
 }
 
+func (w *Writer) writeAt(buf []byte, pos uint64) error {
+	if err := w.fbuf.Flush(); err != nil {
+		return err
+	}
+	_, err := w.f.WriteAt(buf, int64(pos))
+	return err
+}
+
 // addPadding adds zero byte padding until the file size is a multiple size.
 func (w *Writer) addPadding(size int) error {
 	p := w.pos % uint64(size)
@@ -469,21 +477,42 @@ func (w *Writer) writeLabelIndexesOffsetTable() error {
 
 // writePostingsOffsetTable writes the postings offset table.
 func (w *Writer) writePostingsOffsetTable() error {
-	w.buf2.Reset()
-	w.buf2.PutBE32int(len(w.postings))
+	startPos := w.pos
+	// Leave space for the length.
+	if err := w.write([]byte("alen")); err != nil {
+		return err
+	}
+	w.crc32.Reset()
+
+	w.buf1.Reset()
+	w.buf1.PutBE32int(len(w.postings))
+	w.buf1.WriteToHash(w.crc32)
+	if err := w.write(w.buf1.Get()); err != nil {
+		return err
+	}
 
 	for _, e := range w.postings {
-		w.buf2.PutUvarint(2)
-		w.buf2.PutUvarintStr(e.name)
-		w.buf2.PutUvarintStr(e.value)
-		w.buf2.PutUvarint64(e.offset)
+		w.buf1.Reset()
+		w.buf1.PutUvarint(2)
+		w.buf1.PutUvarintStr(e.name)
+		w.buf1.PutUvarintStr(e.value)
+		w.buf1.PutUvarint64(e.offset)
+		w.buf1.WriteToHash(w.crc32)
+		if err := w.write(w.buf1.Get()); err != nil {
+			return err
+		}
+	}
+
+	// Write out the length.
+	w.buf1.Reset()
+	w.buf1.PutBE32int(int(w.pos - startPos - 4))
+	if err := w.writeAt(w.buf1.Get(), startPos); err != nil {
+		return err
 	}
 
 	w.buf1.Reset()
-	w.buf1.PutBE32int(w.buf2.Len())
-	w.buf2.PutHash(w.crc32)
-
-	return w.write(w.buf1.Get(), w.buf2.Get())
+	w.buf1.PutHashSum(w.crc32)
+	return w.write(w.buf1.Get())
 }
 
 const indexTOCLen = 6*8 + 4
